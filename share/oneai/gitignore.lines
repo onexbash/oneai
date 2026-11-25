@@ -2,5 +2,5 @@
 .claude/settings.local.json
 .claude/plan.md
 .claude/metrics.csv
-STATE.md
-STATE-archive.md
+/STATE.md
+/STATE-archive.md

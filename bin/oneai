@@ -3,7 +3,7 @@
 # See `oneai --help`.
 set -eu
 
-ONEAI_VERSION="0.1.0"
+ONEAI_VERSION="0.1.1"
 MAX_TASKS=4
 
 # ---------------------------------------------------------------- basics ---
@@ -257,8 +257,10 @@ setup_files() {
 
   (cd "$SHARE/templates" && find . -type f | sed 's|^\./||' | sort) >"$tmp/list"
   while IFS= read -r rel; do
+    target="$rel"
     case "$rel" in
-      STATE.md) [ "$ROOT" = "$MAIN" ] || continue ;; # the board lives in the main checkout only
+      # Shipped as STATE.template.md: many global gitignores skip STATE.md.
+      STATE.template.md) [ "$ROOT" = "$MAIN" ] || continue; target=STATE.md ;; # main checkout only
     esac
     out="$tmp/r/$rel"
     mkdir -p "$(dirname "$out")"
@@ -267,12 +269,26 @@ setup_files() {
       jq '.enabledMcpjsonServers = ((.enabledMcpjsonServers // []) + ["playwright"] | unique)' "$out" >"$out.j" && mv "$out.j" "$out"
     fi
     case "$rel" in *.sh) chmod +x "$out" ;; esac
-    place_file "$out" "$ROOT/$rel"
+    place_file "$out" "$ROOT/$target"
   done <"$tmp/list"
 
   if [ "$frontend" -eq 1 ]; then
     place_file "$SHARE/optional/mcp.json" "$ROOT/.mcp.json"
   fi
+
+  # oneai < 0.1.1 wrote unanchored STATE.md lines, which ignore that name in every folder.
+  for legacy in STATE.md STATE-archive.md; do
+    grep -qxF "$legacy" "$ROOT/.gitignore" 2>/dev/null || continue
+    info ".gitignore line '$legacy' ignores that file name in every folder, not only the root."
+    if ask "Replace it with '/$legacy'?"; then
+      if [ "$DRY" -eq 0 ]; then
+        awk -v l="$legacy" '$0 == l { print "/" l; next } { print }' "$ROOT/.gitignore" >"$ROOT/.gitignore.oneai-tmp" &&
+          mv "$ROOT/.gitignore.oneai-tmp" "$ROOT/.gitignore"
+      fi
+      ok "anchored /$legacy in .gitignore"
+      CHANGED_FILES="$CHANGED_FILES .gitignore"
+    fi
+  done
 
   # .gitignore: append the lines that are missing.
   missing=""
@@ -416,7 +432,13 @@ state_unlock() { rmdir "$lock" 2>/dev/null || true; trap - EXIT; }
 
 state_ensure() {
   f="$(state_file)"
-  [ -f "$f" ] || cp "$SHARE/templates/STATE.md" "$f"
+  [ -f "$f" ] && return 0
+  [ "$DRY" -eq 0 ] || return 0
+  if [ -f "$SHARE/templates/STATE.template.md" ]; then
+    cp "$SHARE/templates/STATE.template.md" "$f"
+  else
+    printf '# State\n\n## Goals\n\n## Decisions\n\n## Backlog\n\n## In progress\n\n## Open questions for me\n\n## Known issues\n' >"$f"
+  fi
 }
 
 # state_set SLUG STATUS: replace or add "- SLUG | worktree | STATUS | time" under "## In progress".
@@ -566,6 +588,7 @@ cmd_task_start() {
   wt="$(dirname "$MAIN")/$(basename "$MAIN").worktrees/$slug"
   meta="$(meta_root "$MAIN")/$slug"
   info "task $slug: $branch from $base in $wt"
+  state_ensure || die "cannot create $(state_file)"
   run mkdir -p "$(dirname "$wt")"
   run git -C "$MAIN" worktree add -q -b "$branch" "$wt" "$base"
   if [ "$DRY" -eq 0 ]; then

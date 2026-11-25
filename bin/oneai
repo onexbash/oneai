@@ -1,0 +1,1025 @@
+#!/usr/bin/env bash
+# oneai: set up a project for Claude Code + TUIOS and run tasks in worktrees.
+# See `oneai --help`.
+set -eu
+
+ONEAI_VERSION="0.1.0"
+MAX_TASKS=4
+
+# ---------------------------------------------------------------- basics ---
+
+src="$0"
+while [ -L "$src" ]; do
+  d="$(cd "$(dirname "$src")" && pwd -P)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$d/$src" ;; esac
+done
+SELF="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+SHARE="${ONEAI_SHARE:-$(dirname "$(dirname "$SELF")")/share/oneai}"
+CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+DRY=0
+YES=0
+ATTACH=1
+TRUST="${ONEAI_TRUST:-0}"
+
+if [ -t 2 ]; then C_B=$(printf '\033[1m'); C_0=$(printf '\033[0m'); C_Y=$(printf '\033[33m'); C_R=$(printf '\033[31m'); C_G=$(printf '\033[32m')
+else C_B=""; C_0=""; C_Y=""; C_R=""; C_G=""; fi
+
+info() { printf '%s==>%s %s\n' "$C_B" "$C_0" "$*" >&2; }
+ok() { printf '%s ok%s %s\n' "$C_G" "$C_0" "$*" >&2; }
+warn() { printf '%swarn:%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
+die() { printf '%soneai:%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+
+# run CMD...: execute, or only print it with --dry-run.
+run() {
+  if [ "$DRY" -eq 1 ]; then printf '[dry-run] %s\n' "$*" >&2; else "$@"; fi
+}
+
+# ask QUESTION: y/N on the terminal. --yes answers yes, --dry-run answers no.
+ask() {
+  if [ "$DRY" -eq 1 ]; then printf '[dry-run] would ask: %s\n' "$1" >&2; return 1; fi
+  if [ "$YES" -eq 1 ]; then return 0; fi
+  { : </dev/tty; } 2>/dev/null || return 1
+  printf '%s [y/N] ' "$1" >/dev/tty
+  read -r a </dev/tty || return 1
+  case "$a" in y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
+}
+
+# tu ARGS...: tuios, optionally against a separate daemon (ONEAI_TUIOS_SERVER, for tests).
+tu() {
+  if [ -n "${ONEAI_TUIOS_SERVER:-}" ]; then tuios --server "$ONEAI_TUIOS_SERVER" "$@"; else tuios "$@"; fi
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+# ------------------------------------------------------------------ help ---
+
+usage() {
+  cat <<EOF
+oneai $ONEAI_VERSION: Claude Code + TUIOS setup, one worktree per task.
+
+Usage:
+  oneai [options] [PATH]          Set up PATH (default: .) and open its TUIOS session
+  oneai setup [options] [PATH]    Only create/update the project files and integration
+  oneai open [PATH]               Only create or attach the TUIOS session
+  oneai deps                      List missing dependencies
+
+  oneai task start NAME [PROMPT]  New worktree + Claude Code session on workspace 5
+  oneai task ls                   Tasks, their status and whether they are ready
+  oneai task review NAME          Open the TUIOS review of a task
+  oneai task finish NAME          Verify, ask, merge, clean up, log metrics
+  oneai task drop NAME            Abandon a task (worktree removed, branch kept)
+  oneai task ready                (agent, via /finish) verify and hand over for merge
+  oneai task context              (agent, via /finish) branch, base, status, diff stat
+
+  oneai verify [--all]            Full checks here, or in every task worktree
+  oneai state set NAME STATUS     Update a task's line in STATE.md
+  oneai state done NAME NOTE      Move a task from STATE.md to STATE-archive.md
+  oneai state show                Print STATE.md
+  oneai metrics log|summary|sessions   See 'oneai metrics --help'
+
+Options:
+  -n, --dry-run      Show what would happen; change nothing
+  -y, --yes          Answer yes to every question (also global-config changes)
+  --no-attach        Create the session but don't attach
+  --trust            task start: mark the new worktree as trusted in Claude Code
+                     (see Worktree trust below). Default from ONEAI_TRUST=1
+  --uninstall        Remove the oneai command and its files
+  -h, --help         This help
+  -V, --version      Version
+
+What 'oneai PATH' does (idempotent, asks before every change):
+  1. Checks dependencies and lists what is missing.
+  2. Installs the TUIOS Claude Code integration (hooks, status line) if it is
+     missing; backs up your Claude Code settings.json first.
+  3. Creates project files without overwriting: CLAUDE.md, .claude/settings.json
+     (allowlist, hooks), hooks, slash commands (/finish /lesson /docs),
+     subagents (explorer, log-reader), rules, justfile, STATE.md, .mcp.json
+     (Playwright, frontend projects only). Existing files that differ get a
+     diff and a question. Offers to commit them (worktrees need them committed).
+  4. Creates the TUIOS session (or attaches): 1 Coding, 2 Main, 3 Logstream,
+     4 Board, 5 Tasks.
+
+Task flow:
+  oneai task start login-rate-limit "Add rate limiting to the login endpoint"
+    -> worktree ../<repo>.worktrees/login-rate-limit on branch task/login-rate-limit,
+       Claude Code (Opus, plan mode) on workspace 5, a STATE.md entry, and a
+       minimized gate pane. Max $MAX_TASKS tasks at once.
+  Approve the plan in the TUIOS Inbox. The agent implements; fast checks run
+  after each turn. It ends with /finish, which runs the full verify, commits and
+  calls 'oneai task ready'. The gate then asks in the Inbox:
+  merge / review / send back / later. 'review' opens the TUIOS review; leave
+  notes there, then 'send back' sends them as one batch. 'merge' merges into the
+  base branch, removes the worktree, archives the STATE.md entry, logs metrics
+  and offers a docs task on Sonnet built from the merged diff.
+
+Worktree trust:
+  Claude Code loads a project's permission allowlist only in folders you
+  trusted, and trust is stored per path, so every new worktree starts
+  untrusted: the session stops at the trust dialog and the allowlist is
+  ignored. --trust (or ONEAI_TRUST=1) adds the worktree path to
+  projects[...].hasTrustDialogAccepted in $CLAUDE_CFG/.claude.json
+  (backup: .claude.json.oneai-bak). Opt in only for repositories you trust.
+
+Notifications (optional, off by default):
+  Set ONEAI_NOTIFY_URL (for example an ntfy topic URL) in the "env" block of
+  .claude/settings.local.json. On "needs input" the hook POSTs only
+  "needs input: <pane name>", no project content.
+
+Environment: ONEAI_TRUST, ONEAI_NOTIFY_URL, ONEAI_TUIOS_SERVER (use another
+tuios daemon), ONEAI_SHARE (templates dir), CLAUDE_CONFIG_DIR.
+EOF
+}
+
+# ------------------------------------------------------------ repository ---
+
+repo_root() { git -C "${1:-.}" rev-parse --show-toplevel 2>/dev/null; }
+main_checkout() { git -C "$1" worktree list --porcelain | sed -n '1s/^worktree //p'; }
+common_dir() { (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P); }
+session_name() { basename "$1" | sed 's/[^A-Za-z0-9_-]/-/g'; }
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9][^a-z0-9]*/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-40
+}
+meta_root() { printf '%s/oneai/tasks' "$(common_dir "$1")"; }
+
+# Resolve the project from a directory: sets ROOT (this checkout), MAIN, SESSION.
+project_from() {
+  ROOT="$(repo_root "$1")" || die "not inside a git repository: $1"
+  MAIN="$(main_checkout "$ROOT")"
+  SESSION="$(session_name "$MAIN")"
+}
+
+# Inside a task worktree: sets SLUG, META, BRANCH.
+task_here() {
+  project_from .
+  BRANCH="$(git -C "$ROOT" branch --show-current)"
+  case "$BRANCH" in task/* | docs/*) ;; *) die "not in a task worktree (branch is '$BRANCH')" ;; esac
+  SLUG="${BRANCH#*/}"
+  META="$(meta_root "$ROOT")/$SLUG"
+  [ -d "$META" ] || die "no oneai metadata for $SLUG"
+}
+
+# By name, from anywhere in the project: sets SLUG, META, WT, BRANCH, BASE.
+task_named() {
+  project_from "${REPO:-.}"
+  SLUG="$(slugify "$1")"
+  META="$(meta_root "$MAIN")/$SLUG"
+  [ -d "$META" ] || die "no task '$SLUG' (see 'oneai task ls')"
+  WT="$(cat "$META/path")"
+  BRANCH="$(cat "$META/branch")"
+  BASE="$(cat "$META/base")"
+}
+
+# ------------------------------------------------------------------ deps ---
+
+cmd_deps() {
+  missing_req=""
+  missing_opt=""
+  for t in git tuios claude jq; do have "$t" || missing_req="$missing_req $t"; done
+  for t in lazygit nvim glow just shellcheck curl; do have "$t" || missing_opt="$missing_opt $t"; done
+  if [ -z "$missing_req$missing_opt" ]; then ok "all dependencies found"; return 0; fi
+  [ -z "$missing_opt" ] || warn "missing (recommended):$missing_opt  ->  brew install$missing_opt"
+  if [ -n "$missing_req" ]; then
+    printf '%smissing (required):%s%s\n' "$C_R" "$C_0" "$missing_req" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ----------------------------------------------------------- integration ---
+
+setup_integration() {
+  have tuios || return 0
+  status="$(tuios integration status claude-code 2>&1 || true)"
+  want=""
+  case "$status" in *"claude-code  installed, current"* | *"claude-code installed, current"*) ;; *) want="hooks" ;; esac
+  case "$status" in *"statusline: installed"*) ;; *) want="$want statusline" ;; esac
+  if [ -z "$want" ]; then ok "TUIOS Claude Code integration installed (hooks, status line)"; return 0; fi
+  info "TUIOS Claude Code integration missing:$( [ -n "$want" ] && printf ' %s' "$want")"
+  info "It writes hook entries (and a status line feeding context %% and cost to TUIOS) into $CLAUDE_CFG/settings.json."
+  ask "Install it now (settings.json is backed up first)?" || { warn "skipped: plan approvals and questions won't reach the Inbox"; return 0; }
+  if [ -e "$CLAUDE_CFG/settings.json" ]; then
+    bak="$CLAUDE_CFG/settings.json.oneai-bak-$(date +%Y%m%d%H%M%S)"
+    run cp -L "$CLAUDE_CFG/settings.json" "$bak" && ok "backup: $bak"
+  fi
+  if ! run tuios integration install claude-code --statusline; then
+    warn "install with --statusline refused (you have your own status line?)."
+    warn "keep yours with: tuios integration install claude-code --then '<your statusline command>'"
+    run tuios integration install claude-code || warn "integration install failed"
+  fi
+}
+
+# --------------------------------------------------------- project files ---
+
+is_frontend() {
+  [ -f "$1/package.json" ] &&
+    jq -e '[(.dependencies // {}), (.devDependencies // {})] | add | keys[]
+           | select(test("^(svelte|@sveltejs/kit|react|react-dom|vue|nuxt|next|astro|solid-js|@angular/core|vite|preact|lit)$"))' \
+      "$1/package.json" >/dev/null 2>&1
+}
+
+CHANGED_FILES=""
+
+# place_file RENDERED TARGET: create, or diff and ask when different.
+place_file() {
+  rel="${2#"$ROOT"/}"
+  if [ ! -e "$2" ]; then
+    if [ "$DRY" -eq 1 ]; then printf '[dry-run] would create %s\n' "$rel" >&2; return 0; fi
+    mkdir -p "$(dirname "$2")"
+    cp "$1" "$2"
+    ok "created $rel"
+    CHANGED_FILES="$CHANGED_FILES $rel"
+  elif cmp -s "$1" "$2"; then
+    :
+  else
+    info "$rel differs from the oneai template:"
+    diff -u "$2" "$1" | sed -n '3,200p' >&2 || true
+    if ask "Overwrite $rel with the template (yours goes to $rel.oneai-bak)?"; then
+      run cp "$2" "$2.oneai-bak"
+      run cp "$1" "$2"
+      ok "updated $rel"
+      CHANGED_FILES="$CHANGED_FILES $rel"
+    else
+      info "kept your $rel"
+    fi
+  fi
+}
+
+setup_files() {
+  [ -d "$SHARE/templates" ] || die "templates not found in $SHARE (set ONEAI_SHARE)"
+  tmp="$(mktemp -d)"
+  project="$(basename "$ROOT")"
+  frontend=0
+  is_frontend "$ROOT" && frontend=1
+
+  (cd "$SHARE/templates" && find . -type f | sed 's|^\./||' | sort) >"$tmp/list"
+  while IFS= read -r rel; do
+    case "$rel" in
+      STATE.md) [ "$ROOT" = "$MAIN" ] || continue ;; # the board lives in the main checkout only
+    esac
+    out="$tmp/r/$rel"
+    mkdir -p "$(dirname "$out")"
+    sed "s|{{PROJECT}}|$project|g" "$SHARE/templates/$rel" >"$out"
+    if [ "$rel" = ".claude/settings.json" ] && [ "$frontend" -eq 1 ]; then
+      jq '.enabledMcpjsonServers = ((.enabledMcpjsonServers // []) + ["playwright"] | unique)' "$out" >"$out.j" && mv "$out.j" "$out"
+    fi
+    case "$rel" in *.sh) chmod +x "$out" ;; esac
+    place_file "$out" "$ROOT/$rel"
+  done <"$tmp/list"
+
+  if [ "$frontend" -eq 1 ]; then
+    place_file "$SHARE/optional/mcp.json" "$ROOT/.mcp.json"
+  fi
+
+  # .gitignore: append the lines that are missing.
+  missing=""
+  while IFS= read -r line; do
+    case "$line" in "" | "#"*) continue ;; esac
+    grep -qxF "$line" "$ROOT/.gitignore" 2>/dev/null || missing="$missing$line
+"
+  done <"$SHARE/gitignore.lines"
+  if [ -n "$missing" ]; then
+    info ".gitignore lacks (personal and per-checkout files):"
+    printf '%s' "$missing" | sed 's/^/    /' >&2
+    if ask "Append them to .gitignore?"; then
+      if [ "$DRY" -eq 0 ]; then
+        nl=""
+        if [ -s "$ROOT/.gitignore" ] && [ -n "$(tail -c1 "$ROOT/.gitignore")" ]; then nl="
+"; fi
+        printf '%s# oneai: personal and per-checkout files\n%s' "$nl" "$missing" >>"$ROOT/.gitignore"
+      fi
+      ok "updated .gitignore"
+      CHANGED_FILES="$CHANGED_FILES .gitignore"
+    fi
+  fi
+  rm -rf "$tmp"
+
+  # STATE.md is ignored by git, so it is not part of the commit below.
+  commit_files=""
+  for f in $CHANGED_FILES; do [ "$f" = STATE.md ] || commit_files="$commit_files $f"; done
+  if [ -n "$commit_files" ]; then
+    info "Task worktrees branch off HEAD, so these files must be committed to reach them."
+    if ask "Commit them now (only these files)?"; then
+      # shellcheck disable=SC2086 # repo-relative paths without spaces
+      run git -C "$ROOT" add -- $commit_files
+      # shellcheck disable=SC2086
+      run git -C "$ROOT" commit -q -m "chore: add oneai Claude Code setup" -- $commit_files && ok "committed"
+    else
+      warn "not committed: commit them before 'oneai task start'"
+    fi
+  fi
+}
+
+# --------------------------------------------------------------- session ---
+
+session_exists() { tu ls --json 2>/dev/null | jq -e --arg n "$1" 'any(.[]?; .name == $n)' >/dev/null 2>&1; }
+
+# pane_cmd PROGRAM: PROGRAM if installed, else nothing (the pane gets a shell).
+pane_cmd() { if have "$1"; then printf '%s' "$1"; fi; }
+
+new_win() { # NAME WORKSPACE [-- CMD...]
+  n="$1"; w="$2"; shift 2
+  run tu new-window "$n" --workspace "$w" -s "$SESSION" --cwd "$MAIN" --no-focus "$@" >/dev/null
+}
+split_win() { # TARGET DIRECTION RATIO NAME [-- CMD...]
+  t="$1"; dir="$2"; r="$3"; n="$4"; shift 4
+  run tu split-window "$dir" -w "$t" -s "$SESSION" --ratio "$r" --name "$n" --cwd "$MAIN" --no-focus "$@" >/dev/null
+}
+
+create_session() {
+  info "creating TUIOS session '$SESSION'"
+  run tu new "$SESSION" --detach --cwd "$MAIN" >/dev/null
+  first=""
+  [ "$DRY" -eq 1 ] || first="$(tu list-windows -s "$SESSION" --json | jq -r '.windows[0].window_id // empty')"
+  envs="ONEAI_TUIOS_SERVER=${ONEAI_TUIOS_SERVER:-}"
+
+  # 1 Coding: lazygit (top-left) / shell (bottom-left) | nvim (right 70%)
+  lg="$(pane_cmd lazygit)"; nv="$(pane_cmd nvim)"
+  if [ -n "$lg" ]; then new_win lazygit 1 -- "$lg"; else new_win lazygit 1; fi
+  [ -z "$first" ] || run tu close-window "$first" -s "$SESSION" >/dev/null
+  if [ -n "$nv" ]; then split_win lazygit right 70 nvim -- "$nv"; else split_win lazygit right 70 nvim; fi
+  split_win lazygit down 50 shell
+  run tu set-workspace-name 1 Coding -s "$SESSION" >/dev/null
+
+  # 2 Main: Claude Code on the main checkout
+  run tu start-agent claude -s "$SESSION" --workspace 2 --cwd "$MAIN" --name main --model opus \
+    --env ONEAI_PANE=main --no-wait >/dev/null || warn "could not start Claude Code on workspace 2"
+  run tu set-workspace-name 2 Main -s "$SESSION" >/dev/null
+
+  # 3 Logstream: two shells, 50/50
+  new_win logs-left 3
+  split_win logs-left right 50 logs-right
+  run tu set-workspace-name 3 Logstream -s "$SESSION" >/dev/null
+
+  # 4 Board: STATE.md live (left) | agents, tasks, Inbox (right)
+  new_win state 4 -- env "$envs" "$SELF" board state "$MAIN"
+  split_win state right 50 agents -- env "$envs" "$SELF" board agents "$MAIN"
+  run tu set-workspace-name 4 Board -s "$SESSION" >/dev/null
+
+  # 5 Tasks: a shell for 'oneai task start'; task panes land beside it
+  new_win tasks 5
+  run tu set-workspace-name 5 Tasks -s "$SESSION" >/dev/null
+
+  run tu select-workspace 1 -s "$SESSION" >/dev/null
+  ok "session '$SESSION' ready"
+}
+
+open_session() {
+  have tuios || die "tuios not found"
+  if session_exists "$SESSION"; then ok "session '$SESSION' exists"; else create_session; fi
+  [ "$ATTACH" -eq 1 ] && [ "$DRY" -eq 0 ] || return 0
+  if [ -n "${TUIOS_SESSION:-}" ]; then
+    tu switch-session "$SESSION"
+  else
+    exec_tu attach "$SESSION"
+  fi
+}
+exec_tu() {
+  if [ -n "${ONEAI_TUIOS_SERVER:-}" ]; then exec tuios --server "$ONEAI_TUIOS_SERVER" "$@"; else exec tuios "$@"; fi
+}
+
+cmd_setup_all() { # PATH
+  path="${1:-.}"
+  [ -d "$path" ] || die "no such directory: $path"
+  cmd_deps || { [ "$DRY" -eq 1 ] || die "install the required tools first"; }
+  if ! repo_root "$path" >/dev/null; then
+    ask "$path is not a git repository. Run 'git init' there?" || die "oneai needs a git repository"
+    run git -C "$path" init -q
+    [ "$DRY" -eq 1 ] && { info "dry-run stops here for a new repository"; return 0; }
+  fi
+  project_from "$path"
+  [ "$ROOT" = "$MAIN" ] || warn "$ROOT is a worktree; the session and STATE.md belong to $MAIN"
+  setup_integration
+  setup_files
+  if [ -z "$(git -C "$ROOT" rev-parse --verify -q HEAD)" ]; then
+    warn "the repository has no commit yet; task worktrees need one"
+  fi
+}
+
+# ------------------------------------------------------------------ state ---
+
+state_file() { printf '%s/STATE.md' "$MAIN"; }
+
+state_lock() {
+  lock="$(common_dir "$MAIN")/oneai/state.lock"
+  mkdir -p "$(dirname "$lock")"
+  i=0
+  until mkdir "$lock" 2>/dev/null; do
+    i=$((i + 1)); [ "$i" -lt 50 ] || die "STATE.md is locked ($lock)"; sleep 0.1
+  done
+  trap 'rmdir "$lock" 2>/dev/null' EXIT
+}
+state_unlock() { rmdir "$lock" 2>/dev/null || true; trap - EXIT; }
+
+state_ensure() {
+  f="$(state_file)"
+  [ -f "$f" ] || cp "$SHARE/templates/STATE.md" "$f"
+}
+
+# state_set SLUG STATUS: replace or add "- SLUG | worktree | STATUS | time" under "## In progress".
+state_set() {
+  state_ensure
+  wt="-"
+  m="$(meta_root "$MAIN")/$1"
+  [ -f "$m/path" ] && wt="$(cat "$m/path")" && wt="${wt#"$(dirname "$MAIN")"/}"
+  line="- $1 | $wt | $2 | $(date '+%Y-%m-%d %H:%M')"
+  [ "$DRY" -eq 1 ] && { printf '[dry-run] STATE.md: %s\n' "$line" >&2; return 0; }
+  state_lock
+  f="$(state_file)"
+  awk -v slug="$1" -v line="$line" '
+    function flush() { while (blanks > 0) { print ""; blanks-- } }
+    /^## / {
+      if (insec && !done) { print line; done = 1 }
+      flush(); insec = ($0 == "## In progress"); print; next
+    }
+    insec && $0 == "" { blanks++; next }
+    insec && index($0, "- " slug " |") == 1 { flush(); if (!done) { print line; done = 1 }; next }
+    { flush(); print }
+    END { if (!done) { if (!insec) print "\n## In progress"; print line } flush() }
+  ' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  state_unlock
+  n="$(wc -l <"$f" | tr -d ' ')"
+  [ "$n" -le 150 ] || warn "STATE.md has $n lines (limit 150): move finished items to STATE-archive.md"
+}
+
+# state_done SLUG NOTE: drop the line, append to STATE-archive.md.
+state_done() {
+  state_ensure
+  [ "$DRY" -eq 1 ] && { printf '[dry-run] STATE.md: archive %s\n' "$1" >&2; return 0; }
+  state_lock
+  f="$(state_file)"
+  awk -v slug="$1" 'index($0, "- " slug " |") != 1' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  a="$MAIN/STATE-archive.md"
+  [ -f "$a" ] || printf '# State archive\n\n' >"$a"
+  printf -- '- %s %s: %s\n' "$(date +%F)" "$1" "$2" >>"$a"
+  state_unlock
+}
+
+cmd_state() {
+  sub="${1:-show}"; shift || true
+  project_from "${REPO:-.}"
+  case "$sub" in
+    set) [ $# -ge 2 ] || die "usage: oneai state set NAME STATUS"; s="$(slugify "$1")"; shift; state_set "$s" "$*" ;;
+    done) [ $# -ge 2 ] || die "usage: oneai state done NAME NOTE"; s="$(slugify "$1")"; shift; state_done "$s" "$*" ;;
+    show) state_ensure; cat "$(state_file)" ;;
+    *) die "unknown: oneai state $sub" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- verify ---
+
+# verify_dir DIR: full checks; records the first result and the verified commit for tasks.
+verify_dir() {
+  checks="$1/.claude/hooks/checks.sh"
+  [ -f "$checks" ] || die "no $checks (run 'oneai setup')"
+  rc=0
+  (cd "$1" && bash "$checks" full) || rc=$?
+  br="$(git -C "$1" branch --show-current)"
+  case "$br" in
+    task/* | docs/*)
+      m="$(meta_root "$1")/${br#*/}"
+      if [ -d "$m" ]; then
+        [ -f "$m/verify_first" ] || { [ "$rc" -eq 0 ] && echo y || echo n; } >"$m/verify_first"
+        if [ "$rc" -eq 0 ] && [ -z "$(git -C "$1" status --porcelain)" ]; then
+          git -C "$1" rev-parse HEAD >"$m/verified"
+        else
+          rm -f "$m/verified"
+        fi
+      fi
+      ;;
+  esac
+  return "$rc"
+}
+
+cmd_verify() {
+  if [ "${1:-}" = "--all" ]; then
+    project_from "${REPO:-.}"
+    root="$(meta_root "$MAIN")"
+    fails=0; n=0
+    for m in "$root"/*/; do
+      [ -f "$m/path" ] || continue
+      n=$((n + 1))
+      s="$(basename "$m")"
+      if out="$(verify_dir "$(cat "$m/path")" 2>&1)"; then ok "$s"
+      else fails=$((fails + 1)); printf '%sFAIL%s %s\n' "$C_R" "$C_0" "$s"; printf '%s\n' "$out" | grep -v '^ok ' | sed 's/^/    /'; fi
+    done
+    [ "$n" -gt 0 ] || info "no tasks"
+    [ "$fails" -eq 0 ]
+  else
+    root="$(repo_root .)" || die "not in a git repository"
+    verify_dir "$root"
+  fi
+}
+
+# ----------------------------------------------------------------- tasks ---
+
+active_tasks() { find "$(meta_root "$MAIN")" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '; }
+
+claude_json() { if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s/.claude.json' "$CLAUDE_CONFIG_DIR"; else printf '%s/.claude.json' "$HOME"; fi; }
+
+trust_path() {
+  f="$(claude_json)"
+  [ -f "$f" ] || { warn "no $f; Claude Code will ask to trust $1"; return 0; }
+  [ "$DRY" -eq 1 ] && { printf '[dry-run] trust %s in %s\n' "$1" "$f" >&2; return 0; }
+  cp "$f" "$f.oneai-bak"
+  jq --arg p "$1" '.projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' "$f" >"$f.oneai-tmp" &&
+    chmod 600 "$f.oneai-tmp" && mv "$f.oneai-tmp" "$f" && ok "trusted $1 (backup: $f.oneai-bak)"
+}
+
+pane_id() {
+  tu list-windows -s "$SESSION" --json 2>/dev/null |
+    jq -r --arg n "$1" '[.windows[]? | select(.display_name == $n or .title == $n)][0].window_id // empty' 2>/dev/null || true
+}
+
+cmd_task_start() {
+  model=opus; mode=plan; base=""; kind=task; pane=1; name=""; prompt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model) model="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --base) base="$2"; shift 2 ;;
+      --docs) kind=docs; model=sonnet; mode=acceptEdits; prompt="/docs $2"; shift 2 ;;
+      --trust) TRUST=1; shift ;;
+      --no-pane) pane=0; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) if [ -z "$name" ]; then name="$1"; else prompt="${prompt:+$prompt }$1"; fi; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: oneai task start NAME [PROMPT]"
+  project_from "${REPO:-.}"
+  slug="$(slugify "$name")"
+  [ -n "$slug" ] || die "bad task name: $name"
+  branch="$kind/$slug"
+  [ -n "$base" ] || base="$(git -C "$MAIN" branch --show-current)"
+  [ -n "$base" ] || die "the main checkout is on a detached HEAD; pass --base"
+  git -C "$MAIN" rev-parse --verify -q "$base" >/dev/null || die "no commit on '$base' yet"
+  git -C "$MAIN" rev-parse --verify -q "refs/heads/$branch" >/dev/null && die "branch $branch exists already"
+  for f in .claude/settings.json .claude/hooks/checks.sh CLAUDE.md; do
+    git -C "$MAIN" cat-file -e "$base:$f" 2>/dev/null || die "$f is not committed on $base; worktrees would miss it (run 'oneai setup' and commit)"
+  done
+  n="$(active_tasks)"
+  [ "$n" -lt "$MAX_TASKS" ] || die "$n tasks running (max $MAX_TASKS): finish one first"
+
+  wt="$(dirname "$MAIN")/$(basename "$MAIN").worktrees/$slug"
+  meta="$(meta_root "$MAIN")/$slug"
+  info "task $slug: $branch from $base in $wt"
+  run mkdir -p "$(dirname "$wt")"
+  run git -C "$MAIN" worktree add -q -b "$branch" "$wt" "$base"
+  if [ "$DRY" -eq 0 ]; then
+    mkdir -p "$meta"
+    printf '%s\n' "$wt" >"$meta/path"
+    printf '%s\n' "$branch" >"$meta/branch"
+    printf '%s\n' "$base" >"$meta/base"
+    printf '%s\n' "$kind" >"$meta/kind"
+    date +%s >"$meta/started"
+    echo 0 >"$meta/rework"
+    echo 0 >"$meta/interventions"
+    [ ! -f "$MAIN/.claude/settings.local.json" ] || cp "$MAIN/.claude/settings.local.json" "$wt/.claude/settings.local.json"
+  fi
+  [ "$TRUST" = 1 ] && trust_path "$wt"
+  state_set "$slug" "$([ "$kind" = docs ] && echo "docs update" || echo planning)"
+
+  if [ "$pane" -eq 0 ] || ! session_exists "$SESSION"; then
+    [ "$pane" -eq 0 ] || warn "no TUIOS session '$SESSION' (run 'oneai $MAIN')"
+    info "start it yourself: cd $wt && claude --model $model --permission-mode $mode"
+    return 0
+  fi
+  set -- claude -s "$SESSION" --workspace 5 --cwd "$wt" --name "$slug" --model "$model" \
+    --permission-mode "$mode" --grants read,write --env "ONEAI_PANE=$slug" --no-wait
+  [ -z "$prompt" ] || set -- "$@" --prompt "$prompt"
+  run tu start-agent "$@" >/dev/null
+  run tu new-window "gate-$slug" --workspace 5 -s "$SESSION" --cwd "$MAIN" --no-focus \
+    -- env "ONEAI_TUIOS_SERVER=${ONEAI_TUIOS_SERVER:-}" "$SELF" task gate "$slug" >/dev/null
+  run tu set-window -w "gate-$slug" -s "$SESSION" --minimize >/dev/null || true
+  ok "started: approve the plan in the TUIOS Inbox (workspace 5, pane '$slug')"
+}
+
+cmd_task_ls() {
+  project_from "${REPO:-.}"
+  root="$(meta_root "$MAIN")"
+  n=0
+  for m in "$root"/*/; do
+    [ -f "$m/path" ] || continue
+    n=$((n + 1)); s="$(basename "$m")"
+    st="$(grep -F -- "- $s |" "$(state_file)" 2>/dev/null | head -n1 | awk -F' [|] ' '{print $3}')"
+    r=""; [ -f "$m/ready" ] && r=" [ready]"
+    printf '%-28s %-34s%s\n' "$s" "${st:-?}" "$r"
+  done
+  [ "$n" -gt 0 ] || echo "no tasks ($MAX_TASKS max). Start one: oneai task start NAME \"what to do\""
+}
+
+cmd_task_context() {
+  task_here
+  base="$(cat "$META/base")"
+  printf 'task: %s  branch: %s  base: %s\n' "$SLUG" "$BRANCH" "$base"
+  printf 'plan: %s\n' "$([ -f "$ROOT/.claude/plan.md" ] && echo .claude/plan.md || echo none)"
+  echo "status:"; git -C "$ROOT" status --short | sed 's/^/  /'
+  echo "diff vs $base:"; git -C "$ROOT" diff --stat "$base"...HEAD | tail -n 25 | sed 's/^/  /'
+  git -C "$ROOT" diff --stat | tail -n 1 | sed 's/^/  uncommitted: /'
+}
+
+cmd_task_ready() {
+  task_here
+  [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "uncommitted changes: commit them first"
+  head="$(git -C "$ROOT" rev-parse HEAD)"
+  if [ "$(cat "$META/verified" 2>/dev/null)" != "$head" ]; then
+    verify_dir "$ROOT" || die "verify failed: fix and run /finish again"
+  fi
+  printf '%s\n' "$head" >"$META/ready"
+  state_set "$SLUG" "ready for review"
+  ok "ready: the merge question is in the TUIOS Inbox. Stop here and wait."
+}
+
+cmd_task_review() {
+  task_named "$1"
+  id="$(pane_id "$SLUG")"
+  if [ -n "$id" ]; then
+    run tu new-window "review-$SLUG" --workspace 5 -s "$SESSION" --kind view --uri "tuios://review/$id" >/dev/null
+    run tu select-workspace 5 -s "$SESSION" >/dev/null
+  else
+    tu review --base "$BASE" -s "$SESSION" -w "$SLUG" 2>/dev/null || git -C "$WT" diff "$BASE"...HEAD
+  fi
+}
+
+bump() { n="$(cat "$1" 2>/dev/null || echo 0)"; echo $((n + 1)) >"$1"; }
+
+# The gate runs in a minimized pane per task: waits for 'ready', asks in the Inbox.
+cmd_task_gate() {
+  ONEAI_IN_GATE=1
+  task_named "$1"
+  printf 'gate for %s: waiting for the agent to run /finish\n' "$SLUG"
+  while [ -d "$META" ]; do
+    if [ ! -f "$META/ready" ]; then sleep 3; continue; fi
+    ans="$(tu ask-human "Task $SLUG is ready and verified. Merge into $BASE?" \
+      -o merge -o review -o "send back" -o later --timeout 3600000 2>/dev/null)" || continue
+    case "$ans" in
+      merge)
+        if out="$(YES=1 cmd_task_finish_inner 2>&1)"; then
+          printf '%s\n' "$out"
+          offer_docs
+          return 0
+        fi
+        printf '%s\n' "$out"
+        bump "$META/interventions"
+        a="$(tu ask-human "Merging $SLUG failed (conflict or dirty main). Send it back to the agent?" -o "send back" -o "I'll handle it" --timeout 3600000 2>/dev/null)" || a=""
+        if [ "$a" = "send back" ]; then
+          rm -f "$META/ready"; bump "$META/rework"
+          tu queue -s "$SESSION" -w "$SLUG" "Merging into $BASE failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ') Rebase onto $BASE, resolve, then run /finish." >/dev/null || true
+          state_set "$SLUG" "rework (merge failed)"
+        else
+          rm -f "$META/ready"; state_set "$SLUG" "merge failed; waiting for you"
+        fi
+        ;;
+      review) bump "$META/interventions"; cmd_task_review "$SLUG" ;;
+      "send back")
+        bump "$META/interventions"
+        if tu review send -s "$SESSION" -w "$SLUG" >/dev/null 2>&1; then
+          rm -f "$META/ready"; bump "$META/rework"; state_set "$SLUG" "rework (review notes)"
+        else
+          tu ask-human "No unsent review notes for $SLUG. Add notes in the review first." -o ok --timeout 3600000 >/dev/null 2>&1 || true
+        fi
+        ;;
+      *) bump "$META/interventions"; sleep 600 ;;
+    esac
+  done
+}
+
+offer_docs() {
+  [ -f "$MAIN/.claude/commands/docs.md" ] || return 0
+  range="$(cat "${TMPDIR:-/tmp}/oneai-range-$SLUG" 2>/dev/null)" || return 0
+  case "$SLUG" in docs-*) return 0 ;; esac
+  a="$(tu ask-human "Merged $SLUG. Update docs from the merged diff (Sonnet task)?" -o yes -o no --timeout 3600000 2>/dev/null)" || a=no
+  [ "$a" = yes ] && (cd "$MAIN" && cmd_task_start --docs "$range" "docs-$SLUG")
+  return 0
+}
+
+cmd_task_finish() {
+  task_named "$1"
+  cmd_task_finish_inner
+  offer_docs_tty
+}
+
+offer_docs_tty() {
+  [ -f "$MAIN/.claude/commands/docs.md" ] || return 0
+  case "$SLUG" in docs-*) return 0 ;; esac
+  range="$(cat "${TMPDIR:-/tmp}/oneai-range-$SLUG" 2>/dev/null)" || return 0
+  if YES=0 ask "Start a docs task on Sonnet from the merged diff ($range)?"; then
+    cmd_task_start --docs "$range" "docs-$SLUG"
+  fi
+}
+
+# Needs SLUG, META, WT, BRANCH, BASE, MAIN, SESSION.
+cmd_task_finish_inner() {
+  [ -d "$WT" ] || die "worktree $WT is gone"
+  [ -z "$(git -C "$WT" status --porcelain)" ] || die "$SLUG has uncommitted changes"
+  head="$(git -C "$WT" rev-parse HEAD)"
+  if [ "$(cat "$META/verified" 2>/dev/null)" != "$head" ]; then
+    info "verify $SLUG"
+    verify_dir "$WT" || die "verify failed for $SLUG"
+  fi
+  [ "$(git -C "$MAIN" branch --show-current)" = "$BASE" ] || die "main checkout is not on $BASE"
+  [ -n "$(git -C "$MAIN" rev-list "$BASE".."$BRANCH")" ] || die "$BRANCH has no commits beyond $BASE"
+  info "changes of $SLUG:"
+  git -C "$MAIN" diff --stat "$BASE"..."$BRANCH" | tail -n 30 >&2
+  ask "Merge $BRANCH into $BASE?" || die "not merged"
+
+  before="$(git -C "$MAIN" rev-parse "$BASE")"
+  if ! run git -C "$MAIN" merge -q --no-ff -m "Merge $BRANCH" "$BRANCH"; then
+    git -C "$MAIN" merge --abort 2>/dev/null || true
+    state_set "$SLUG" "merge failed: rebase on $BASE needed"
+    die "merge of $BRANCH failed; $MAIN is as it was"
+  fi
+  after="$(git -C "$MAIN" rev-parse HEAD)"
+  printf '%s..%s\n' "$before" "$after" >"${TMPDIR:-/tmp}/oneai-range-$SLUG"
+  ok "merged $BRANCH ($before..$after)"
+
+  metrics_task || warn "metrics not logged"
+
+  for w in "$SLUG" "review-$SLUG"; do
+    id="$(pane_id "$w")"; [ -z "$id" ] || run tu close-window "$id" -s "$SESSION" >/dev/null 2>&1 || true
+  done
+  run git -C "$MAIN" worktree remove "$WT"
+  run git -C "$MAIN" branch -q -d "$BRANCH"
+  state_done "$SLUG" "merged into $BASE ($(git -C "$MAIN" rev-parse --short HEAD))"
+  run rm -rf "$META"
+  ok "$SLUG finished"
+  # Merged from the terminal: close the gate pane and with it its open Inbox question.
+  if [ -z "${ONEAI_IN_GATE:-}" ]; then
+    id="$(pane_id "gate-$SLUG")"; [ -z "$id" ] || run tu close-window "$id" -s "$SESSION" >/dev/null 2>&1 || true
+  fi
+}
+
+# Abandon a task: close its panes, remove the worktree, keep the branch.
+cmd_task_drop() {
+  task_named "$1"
+  if [ -d "$WT" ] && [ -n "$(git -C "$WT" status --porcelain)" ]; then
+    git -C "$WT" status --short >&2
+    ask "$SLUG has uncommitted changes. Stash them and drop the task?" || die "not dropped"
+    run git -C "$WT" stash push -u -q -m "oneai drop $SLUG"
+  fi
+  ask "Drop $SLUG? The worktree goes, branch $BRANCH stays." || die "not dropped"
+  for w in "$SLUG" "review-$SLUG" "gate-$SLUG"; do
+    id="$(pane_id "$w")"; [ -z "$id" ] || run tu close-window "$id" -s "$SESSION" >/dev/null 2>&1 || true
+  done
+  [ ! -d "$WT" ] || run git -C "$MAIN" worktree remove "$WT"
+  state_done "$SLUG" "dropped (branch $BRANCH kept)"
+  run rm -rf "$META"
+  ok "dropped $SLUG"
+}
+
+cmd_task() {
+  sub="${1:-}"; shift || true
+  case "$sub" in
+    start) cmd_task_start "$@" ;;
+    ls | list) cmd_task_ls ;;
+    ready) cmd_task_ready ;;
+    context) cmd_task_context ;;
+    review) [ $# -ge 1 ] || die "usage: oneai task review NAME"; cmd_task_review "$1" ;;
+    finish) [ $# -ge 1 ] || die "usage: oneai task finish NAME"; cmd_task_finish "$1" ;;
+    drop) [ $# -ge 1 ] || die "usage: oneai task drop NAME"; cmd_task_drop "$1" ;;
+    gate) cmd_task_gate "$1" ;;
+    *) die "usage: oneai task start|ls|review|finish|drop|ready|context" ;;
+  esac
+}
+
+# ----------------------------------------------------------------- board ---
+
+cmd_board() {
+  case "${1:-}" in
+    state)
+      MAIN="$2"; f="$MAIN/STATE.md"; last=""
+      while :; do
+        m="$(mtime "$f")"
+        if [ "$m" != "$last" ]; then
+          last="$m"
+          printf '\033[H\033[2J'
+          if [ ! -f "$f" ]; then echo "no STATE.md yet"
+          elif have glow; then glow -w "$(tput cols 2>/dev/null || echo 80)" "$f"
+          else cat "$f"; fi
+        fi
+        sleep 2
+      done
+      ;;
+    agents)
+      project_from "$2"
+      while :; do
+        out="$({
+          printf 'Agents (%s)\n' "$SESSION"; tu list-agents -s "$SESSION" 2>&1
+          printf '\nTasks\n'; REPO="$MAIN" "$SELF" task ls 2>&1
+          printf '\nInbox: '
+          tu list-attention --json 2>/dev/null | jq -r '.counts | to_entries | map(select(.value > 0) | "\(.key) \(.value)") | join(", ") | if . == "" then "empty" else . end'
+          printf '\nProgress of a pane: tuios agent-log -w PANE --recap\n'
+        })"
+        printf '\033[H\033[2J%s\n' "$out"
+        sleep 3
+      done
+      ;;
+    *) die "usage: oneai board state|agents DIR" ;;
+  esac
+}
+
+# --------------------------------------------------------------- metrics ---
+
+METRICS_HEADER='task,date,stage,model,minutes_to_merge,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,interventions,rework_rounds,verify_first_try,sessions,notes'
+
+# Claude Code keeps transcripts in projects/<path with every non-alphanumeric as '-'>.
+projdir_of() { printf '%s/projects/%s' "$CLAUDE_CFG" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g')"; }
+
+transcripts_of() { # DIR: main transcripts of a checkout path, newest first
+  for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
+    d="$(projdir_of "$p")"
+    [ -d "$d" ] && ls -t "$d"/*.jsonl 2>/dev/null
+  done | awk '!seen[$0]++'
+}
+
+jqfiles() { # LIST FILTER...: jq -s over newline-separated files
+  l="$1"; shift
+  printf '%s\n' "$l" | tr '\n' '\0' | xargs -0 jq -s "$@"
+}
+
+# metrics_row FILES TASK STAGE END COST INTERV REWORK VERIFY NOTES -> CSV row
+metrics_row() {
+  files="$1"
+  subs="$(printf '%s\n' "$files" | while IFS= read -r f; do
+    if [ -d "${f%.jsonl}/subagents" ]; then find "${f%.jsonl}/subagents" -name '*.jsonl'; fi; done)"
+  all="$files"
+  if [ -n "$subs" ]; then all="$all
+$subs"; fi
+  tokens="$(jqfiles "$all" -r '
+    [.[] | select(.type == "assistant" and .message.usage != null and .message.model != "<synthetic>")]
+    | unique_by(.message.id // .uuid)
+    | [map(.message.usage.input_tokens // 0), map(.message.usage.output_tokens // 0),
+       map(.message.usage.cache_read_input_tokens // 0), map(.message.usage.cache_creation_input_tokens // 0)]
+    | map(add // 0 | tostring) | join(",")')"
+  # shellcheck disable=SC2016 # jq program, not shell
+  main="$(jqfiles "$files" '
+    def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+    ([.[] | select(.type == "user" and .origin.kind == "human" and (.isSidechain | not))] | unique_by(.uuid)) as $h
+    | {start: ($h | map(.timestamp | ts) | min), humans: ($h | length),
+       model: ([.[] | select(.type == "assistant" and (.isSidechain | not)) | .message.model
+                | select(. != null and . != "<synthetic>")] | group_by(.) | sort_by(-length) | map(.[0]) | join("+"))}')"
+  start="$(printf '%s' "$main" | jq -r '.start // empty')"
+  [ -n "$start" ] || { warn "no human prompt in the transcript(s)"; return 1; }
+  minutes="$(jq -n --argjson s "$start" --argjson e "$4" '(($e - $s) / 60 * 10 | round) / 10')"
+  interv="$6"
+  [ -n "$interv" ] || interv="$(printf '%s' "$main" | jq '[.humans - 1, 0] | max')"
+  ids="$(printf '%s\n' "$files" | while IFS= read -r f; do basename "$f" .jsonl; done | paste -sd ';' -)"
+  clean() { printf '%s' "$1" | tr ',"\n' ";' "; }
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$(clean "$2")" "$(date +%F)" "$3" \
+    "$(printf '%s' "$main" | jq -r .model)" "$minutes" "$tokens" "$5" "$interv" "$7" "$8" "$ids" "$(clean "$9")"
+}
+
+metrics_append() { # CSV ROW
+  [ "$DRY" -eq 1 ] && { printf '[dry-run] %s\n' "$2" >&2; return 0; }
+  mkdir -p "$(dirname "$1")"
+  [ -s "$1" ] || printf '%s\n' "$METRICS_HEADER" >"$1"
+  printf '%s\n' "$2" >>"$1"
+}
+
+# Automatic row at merge time. Interventions = your typed messages after the
+# first prompt + gate answers other than the final merge (plan approval and
+# merge approval are the two fixed gates and not counted).
+metrics_task() {
+  files="$(transcripts_of "$WT")"
+  [ -n "$files" ] || { warn "no Claude Code transcript for $WT"; return 1; }
+  row="$(metrics_row "$files" "$SLUG" oneai "$(date +%s)" "" "" "$(cat "$META/rework" 2>/dev/null || echo 0)" \
+    "$(cat "$META/verify_first" 2>/dev/null)" "$(cat "$META/kind")")" || return 1
+  # add gate answers to the typed-message count (field 11)
+  extra="$(cat "$META/interventions" 2>/dev/null || echo 0)"
+  row="$(printf '%s' "$row" | awk -F, -v OFS=, -v x="$extra" '{ $11 = $11 + x; print }')"
+  metrics_append "$MAIN/.claude/metrics.csv" "$row"
+  ok "metrics: $row"
+}
+
+cmd_metrics() {
+  sub="${1:-}"; shift || true
+  stage=plain; merged=HEAD; cost=""; rework=""; verify=""; interv=""; notes=""; sessions=""; task=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s | --session) sessions="${sessions:+$sessions
+}$2"; shift 2 ;;
+      --stage) stage="$2"; shift 2 ;;
+      --merged) merged="$2"; shift 2 ;;
+      --cost) cost="$2"; shift 2 ;;
+      --rework) rework="$2"; shift 2 ;;
+      --verify) verify="$2"; shift 2 ;;
+      --interventions) interv="$2"; shift 2 ;;
+      --notes) notes="$2"; shift 2 ;;
+      -h | --help) sub=help; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) task="$1"; shift ;;
+    esac
+  done
+  project_from "${REPO:-.}"
+  csv="$MAIN/.claude/metrics.csv"
+  case "$sub" in
+    log)
+      [ -n "$task" ] || die "usage: oneai metrics log [options] TASK"
+      if [ -z "$sessions" ]; then files="$(transcripts_of "$ROOT" | head -n 1)"
+      else files="$(printf '%s\n' "$sessions" | while IFS= read -r s; do
+        if [ -f "$s" ]; then printf '%s\n' "$s"; else find "$CLAUDE_CFG/projects" -maxdepth 2 -name "$s.jsonl" | head -n 1; fi; done)"; fi
+      [ -n "$files" ] || die "no transcript found; pass --session ID"
+      if [ "$merged" = now ]; then end="$(date +%s)"; else end="$(git -C "$ROOT" log -1 --format=%ct "$merged")"; fi
+      if { : </dev/tty; } 2>/dev/null; then
+        [ -n "$rework" ] || { printf 'Rework rounds? ' >/dev/tty; read -r rework </dev/tty; }
+        [ -n "$verify" ] || { printf 'Verify passed first try? [y/n] ' >/dev/tty; read -r verify </dev/tty; }
+      fi
+      case "$verify" in y | n | "") ;; *) die "--verify must be y or n" ;; esac
+      row="$(metrics_row "$files" "$task" "$stage" "$end" "$cost" "$interv" "$rework" "$verify" "$notes")"
+      metrics_append "$csv" "$row"; printf '%s\n' "$row"
+      ;;
+    summary)
+      [ -s "$csv" ] || die "no data in $csv"
+      jq -Rrs '
+        split("\n") | map(select(length > 0)) | .[1:] | map(split(",")) | group_by(.[2])[]
+        | {stage: .[0][2], n: length,
+           min: (map(.[4] | tonumber? // empty) | add / length),
+           tok: (map((.[5] | tonumber? // 0) + (.[6] | tonumber? // 0) + (.[8] | tonumber? // 0)) | add / length),
+           cost: (map(.[9] | tonumber? // empty) | if length > 0 then add / length else null end),
+           intv: (map(.[10] | tonumber? // empty) | add / length),
+           rew: (map(.[11] | tonumber? // empty) | if length > 0 then add / length else null end),
+           vfy: (map(select(.[12] == "y")) | length)}
+        | "\(.stage): \(.n) tasks | \(.min * 10 | round / 10) min | \(.tok | round) tokens (in+out+cache-write) | cost \(.cost // "-") | interventions \(.intv * 10 | round / 10) | rework \(.rew // "-") | verify first try \(.vfy)/\(.n)"' "$csv"
+      ;;
+    sessions)
+      transcripts_of "$ROOT" | head -n 10 | while IFS= read -r f; do
+        jq -rs --arg f "$(basename "$f" .jsonl)" '[.[] | select(.type == "user" and .origin.kind == "human")] as $h
+          | "\($f)  \($h[0].timestamp // "-")  \(($h[0].message.content // "" | tostring | gsub("\\s+"; " "))[0:60])"' "$f"
+      done
+      ;;
+    *)
+      cat <<'EOF'
+oneai metrics log [options] TASK   Log a task done in a plain session (tasks run with
+                                   'oneai task' are logged automatically at merge)
+  -s, --session ID|FILE   transcript(s) to read, repeatable (default: newest here)
+  --stage LABEL           default: plain (automatic rows use: oneai)
+  --merged REF|now        end time (default: HEAD's commit time)
+  --cost USD  --rework N  --verify y|n  --interventions N  --notes TEXT
+oneai metrics summary              Averages per stage
+oneai metrics sessions             Recent sessions of this checkout
+Log: <main checkout>/.claude/metrics.csv
+EOF
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------- uninstall ---
+
+cmd_uninstall() {
+  case "$SELF" in */bin/oneai) ;; *) die "not an installed copy: $SELF" ;; esac
+  case "$SHARE" in */share/oneai) ;; *) die "unexpected share dir: $SHARE" ;; esac
+  [ ! -d "$(dirname "$SELF")/../.git" ] || die "$SELF is a source checkout, not an install"
+  info "removes $SELF and $SHARE"
+  info "project files, the TUIOS integration and your settings stay (tuios integration uninstall claude-code removes that)."
+  ask "Uninstall oneai?" || die "aborted"
+  if [ -w "$(dirname "$SELF")" ] && [ -w "$(dirname "$SHARE")" ]; then
+    run rm -rf "$SHARE"; run rm -f "$SELF"
+  else
+    run sudo rm -rf "$SHARE"; run sudo rm -f "$SELF"
+  fi
+  ok "oneai removed"
+}
+
+# ------------------------------------------------------------------ main ---
+
+main() {
+  cmd=""
+  # Global options anywhere before the first sub-command argument.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n | --dry-run) DRY=1 ;;
+      -y | --yes) YES=1 ;;
+      --no-attach) ATTACH=0 ;;
+      --trust) TRUST=1 ;;
+      --uninstall) cmd=uninstall ;;
+      -V | --version) echo "oneai $ONEAI_VERSION"; exit 0 ;;
+      -h | --help) if [ "$cmd" = metrics ]; then break; fi; usage; exit 0 ;;
+      *) if [ -z "$cmd" ]; then cmd="$1"; else break; fi ;;
+    esac
+    shift
+  done
+  case "$cmd" in
+    uninstall) cmd_uninstall ;;
+    deps) cmd_deps ;;
+    setup) cmd_setup_all "${1:-.}" ;;
+    open) project_from "${1:-.}"; open_session ;;
+    task) cmd_task "$@" ;;
+    verify) cmd_verify "$@" ;;
+    state) cmd_state "$@" ;;
+    board) cmd_board "$@" ;;
+    metrics) cmd_metrics "$@" ;;
+    "") cmd_setup_all .; project_from .; open_session ;;
+    *)
+      [ -d "$cmd" ] || die "unknown command or directory: $cmd (see --help)"
+      cmd_setup_all "$cmd"
+      [ "$DRY" -eq 1 ] && ! repo_root "$cmd" >/dev/null && return 0
+      project_from "$cmd"
+      open_session
+      ;;
+  esac
+}
+
+main "$@"

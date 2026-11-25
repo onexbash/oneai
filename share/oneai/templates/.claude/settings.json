@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "opus",
+  "permissions": {
+    "defaultMode": "plan",
+    "allow": [
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch --show-current)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git restore *)",
+      "Bash(git stash *)",
+      "Bash(ls *)",
+      "Bash(rg *)",
+      "Bash(just verify)",
+      "Bash(just fast)",
+      "Bash(bash .claude/hooks/checks.sh *)",
+      "Bash(oneai verify)",
+      "Bash(oneai verify *)",
+      "Bash(oneai task ready)",
+      "Bash(oneai task context)",
+      "Bash(oneai state show)",
+      "Bash(pnpm install)",
+      "Bash(pnpm run *)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm exec vitest *)",
+      "Bash(pnpm exec eslint *)",
+      "Bash(pnpm exec prettier *)",
+      "Bash(pnpm exec tsc *)",
+      "Bash(pnpm exec svelte-check *)",
+      "Bash(pnpm exec playwright test *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(go mod tidy)",
+      "Bash(gofmt *)",
+      "Bash(golangci-lint run *)",
+      "Bash(shellcheck *)",
+      "Bash(tuios agent-log *)",
+      "Bash(tuios review *)",
+      "Bash(tuios list-agents *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git reset --hard *)",
+      "Bash(oneai task finish *)",
+      "Bash(oneai state *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/format.sh\"" }]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/on-plan.sh\"" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-check.sh\"", "timeout": 300 }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/notify.sh\"" }]
+      }
+    ]
+  }
+}

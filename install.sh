@@ -69,15 +69,25 @@ if [ -z "$SRC" ]; then
 fi
 [ -f "$SRC/bin/oneai" ] && [ -d "$SRC/share/oneai/templates" ] || die "no oneai sources in $SRC"
 
-mkdir -p "$PREFIX/bin" "$PREFIX/share" 2>/dev/null || true
-[ -w "$PREFIX/bin" ] && [ -w "$PREFIX/share" ] ||
-  die "$PREFIX is not writable (no sudo by design): fix its ownership or use ONEAI_PREFIX=\$HOME/.local"
+# Run as yourself: under sudo, `oneai global` below would write into root's Claude config.
+[ "$(id -u)" -ne 0 ] || die "run install.sh as your user, not with sudo: it asks for sudo itself where needed"
 
-rm -rf "$PREFIX/share/oneai.new"
-cp -R "$SRC/share/oneai" "$PREFIX/share/oneai.new"
-rm -rf "$PREFIX/share/oneai"
-mv "$PREFIX/share/oneai.new" "$PREFIX/share/oneai"
-install -m 0755 "$SRC/bin/oneai" "$PREFIX/bin/oneai"
+# /usr/local is owned by root on macOS: only the copy steps below run with sudo.
+SUDO=""
+mkdir -p "$PREFIX/bin" "$PREFIX/share" 2>/dev/null || true
+if [ ! -w "$PREFIX/bin" ] || [ ! -w "$PREFIX/share" ]; then
+  command -v sudo >/dev/null || die "$PREFIX is not writable and sudo is missing: use ONEAI_PREFIX=\$HOME/.local"
+  log_info "$PREFIX is owned by root: copying with sudo (you may be asked for your password)"
+  SUDO=sudo
+fi
+as() { if [ -n "$SUDO" ]; then sudo "$@"; else "$@"; fi; }
+
+as mkdir -p "$PREFIX/bin" "$PREFIX/share"
+as rm -rf "$PREFIX/share/oneai.new"
+as cp -R "$SRC/share/oneai" "$PREFIX/share/oneai.new"
+as rm -rf "$PREFIX/share/oneai"
+as mv "$PREFIX/share/oneai.new" "$PREFIX/share/oneai"
+as install -m 0755 "$SRC/bin/oneai" "$PREFIX/bin/oneai"
 
 log_ok "installed $("$PREFIX/bin/oneai" --version) to $PREFIX/bin/oneai"
 log_info "global layer: helper agents, CLAUDE.md workflow block, worktrees dir in settings.json"

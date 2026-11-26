@@ -8,11 +8,13 @@ the panes. `oneai` sets this up for a repository and gets out of the way.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/onexbash/oneai/main/install.sh | bash
-oneai --dry-run ~/dev/repos/myproject   # see what it would do
-oneai ~/dev/repos/myproject             # set up and attach
 ```
 
 From a local checkout instead: `ONEAI_SRC=~/dev/repos/onexbash/oneai bash install.sh`.
+
+It installs to `/usr/local/bin` and `/usr/local/share/oneai`. Those belong to root on macOS, so
+only the copy steps run with `sudo` (password prompt). Run the installer itself as your user, not
+with `sudo`. Without root: `ONEAI_PREFIX=$HOME/.local`.
 
 `install.sh` ends with `oneai global`, which keeps the global layer in `$CLAUDE_CONFIG_DIR`
 current: the four helper agents, a marked workflow block in your `CLAUDE.md`, and Worktrunk's

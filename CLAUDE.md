@@ -14,7 +14,7 @@ Setup script for the Jarvis + side agents workflow (Claude Code, TUIOS, Worktrun
 
 ## Project notes
 - `bin/oneai` is the whole tool. `share/oneai/templates/` = project layer it installs, `share/oneai/global/` = global layer (`$CLAUDE_CONFIG_DIR`).
-- This repo uses its own templates: keep `.claude/`, `CLAUDE.md`'s structure, `.config/wt.toml` in sync with `share/oneai/templates/`.
+- This repo uses its own templates: keep `.claude/`, `CLAUDE.md`'s structure, `worktrunk.toml` (this repo uses `WORKTRUNK_PROJECT_CONFIG_PATH=worktrunk.toml`; the template is `share/oneai/templates/.config/wt.toml`) in sync with `share/oneai/templates/`.
 - Scripts target Bash 5.3 and GNU tools; must pass shellcheck.
 
 ## Lessons

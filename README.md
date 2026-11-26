@@ -7,10 +7,12 @@ the panes. `oneai` sets this up for a repository and gets out of the way.
 ## Install
 
 ```bash
-ONEAI_SRC=~/dev/repos/onexbash/oneai bash install.sh   # or: curl -fsSL …/install.sh | bash
-oneai --dry-run ~/dev/repos/myproject                   # see what it would do
-oneai ~/dev/repos/myproject                             # set up and attach
+curl -fsSL https://raw.githubusercontent.com/onexbash/oneai/main/install.sh | bash
+oneai --dry-run ~/dev/repos/myproject   # see what it would do
+oneai ~/dev/repos/myproject             # set up and attach
 ```
+
+From a local checkout instead: `ONEAI_SRC=~/dev/repos/onexbash/oneai bash install.sh`.
 
 `install.sh` ends with `oneai global`, which keeps the global layer in `$CLAUDE_CONFIG_DIR`
 current: the four helper agents, a marked workflow block in your `CLAUDE.md`, and Worktrunk's

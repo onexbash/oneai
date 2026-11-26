@@ -3,7 +3,6 @@
 !.env.template
 # oneai: personal and per-checkout files
 .claude/settings.local.json
-.claude/plan.md
 .claude/metrics.csv
 /STATE.md
 /STATE-archive.md

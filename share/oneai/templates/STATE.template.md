@@ -1,17 +1,18 @@
 # State
 
-Short board, not a log. Under 150 lines. Finished items move to STATE-archive.md.
-Task sessions never edit this file; `oneai state` / `oneai task` update the In progress section.
+<!-- oneai-managed. Resume file: only Jarvis writes it. Under 100 lines; finished items go to STATE-archive.md. -->
 
 ## Goals
 
 ## Decisions
 <!-- - YYYY-MM-DD: decision — reason -->
 
-## Backlog
+## Current work
 
-## In progress
-<!-- task | worktree | status | updated -->
+## Side tasks
+<!-- - branch — status (running / waiting for me / ready to merge) -->
+
+## Next
 
 ## Open questions for me
 

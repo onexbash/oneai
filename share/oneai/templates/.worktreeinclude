@@ -1,0 +1,4 @@
+# oneai-managed: gitignored files that `wt step copy-ignored` copies into new worktrees.
+.env
+.env.*
+.claude/settings.local.json

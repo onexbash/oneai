@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# oneai-managed: `oneai --uninstall` asks before removing it once edited.
 # Stop hook: fast checks after each turn. Silent when they pass or nothing
 # changed since the last pass; on failure Claude sees only the failing steps
 # (exit 2). After 3 failed rounds in a row it lets the turn end, so it can't loop.

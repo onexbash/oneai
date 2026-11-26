@@ -31,7 +31,7 @@ Needs `git claude tuios wt jq just`; recommends `lazygit nvim glow shellcheck sh
 | Layer | Location | Files |
 |---|---|---|
 | Global | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | `agents/{explorer,output-reader,test-writer,doc-writer}.md`; in your own `CLAUDE.md` only the `oneai:begin/end workflow` block; in your `settings.json` only the worktrees entry in `permissions.additionalDirectories`. Source: `share/oneai/global/` |
-| Project | `<repo>/` | `CLAUDE.md` (verify command, test and docs paths, lessons), `justfile`, `.claude/settings.json` (narrow allow rules, format + Stop hooks), `.claude/hooks/*.sh`, `.config/wt.toml` (Worktrunk hooks), `.worktreeinclude` |
+| Project | `<repo>/` | `CLAUDE.md` (verify command, test and docs paths, lessons), `justfile`, `.claude/settings.json` (narrow allow rules, format + Stop hooks), `.claude/hooks/*.sh`, `.config/wt.toml` or `$WORKTRUNK_PROJECT_CONFIG_PATH` (Worktrunk hooks), `.worktreeinclude` |
 | Worktrunk user config | `~/.config/worktrunk/config.toml` | `worktree-path = "~/dev/worktrees/{{ repo }}/{{ branch \| sanitize }}"`: worktrees live outside every repo, so Claude Code there loads only the worktree's own CLAUDE.md. `oneai global` adds that directory to the global `additionalDirectories` |
 | Project, not committed | main checkout | `STATE.md`, `STATE-archive.md`, `.claude/metrics.csv`, `.claude/settings.local.json` |
 
@@ -74,7 +74,7 @@ done in a plain session: `oneai metrics sessions` lists recent session IDs, then
 `oneai metrics log --who plain -s <id> --merged <commit> TASK`.
 
 **Existing files**: a daily `oneai REPO` only opens the session. Files you edit (`CLAUDE.md`,
-`STATE.md`, `justfile`, `.claude/settings.json`, `checks.sh`, `wt.toml`, `.worktreeinclude`) are
+`STATE.md`, `justfile`, `.claude/settings.json`, `checks.sh`, the Worktrunk project config, `.worktreeinclude`) are
 created once and then left alone; `format.sh`, `stop-check.sh` and `.mcp.json` follow the templates
 (diff and question when they differ).
 

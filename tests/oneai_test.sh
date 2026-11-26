@@ -32,6 +32,8 @@ cat >"$t/bin/wt" <<'EOF'
 printf 'wt %s\n' "$*" >>"$STUB_LOG"
 EOF
 chmod +x "$t/bin/"*
+# The Worktrunk setup of your shell must not leak into the tests.
+unset WORKTRUNK_CONFIG_PATH WORKTRUNK_SYSTEM_CONFIG_PATH WORKTRUNK_PROJECT_CONFIG_PATH WORKTRUNK_WORKTREE_PATH
 export PATH="$t/bin:$PATH" STUB_LOG="$t/calls.log" CLAUDE_CONFIG_DIR="$t/cfg"
 # Global files are symlinks into a dotfiles dir, with content of their own.
 mkdir -p "$t/cfg" "$t/dot" "$t/xdg/worktrunk"
@@ -85,6 +87,19 @@ mkdir -p "$t/abs"
 printf '{"permissions":{"additionalDirectories":["%s/dev/worktrees"]}}\n' "$HOME" >"$t/abs/settings.json"
 CLAUDE_CONFIG_DIR="$t/abs" "$oneai" global --yes >/dev/null 2>&1
 check "global: absolute spelling counts as present" jq -e '.permissions.additionalDirectories | length == 1' "$t/abs/settings.json"
+# Worktrunk env vars: WORKTRUNK_WORKTREE_PATH beats WORKTRUNK_CONFIG_PATH beats the system config
+printf '{}\n' >"$t/wtenv.json"
+wtdir() { mkdir -p "$t/w" && cp "$t/wtenv.json" "$t/w/settings.json" && CLAUDE_CONFIG_DIR="$t/w" "$@" "$oneai" global --yes >/dev/null 2>&1; jq -r '.permissions.additionalDirectories[0]' "$t/w/settings.json"; }
+echo 'worktree-path = "~/from-user/{{ repo }}"' >"$t/wt-user.toml"
+echo 'worktree-path = "~/from-system/{{ repo }}"' >"$t/wt-system.toml"
+# shellcheck disable=SC2088 # the literal "~/…" in settings.json is what is checked
+{
+check "worktree dir: WORKTRUNK_CONFIG_PATH is read" test "$(wtdir env WORKTRUNK_CONFIG_PATH="$t/wt-user.toml")" = "~/from-user"
+check "worktree dir: system config when the user config has none" \
+  test "$(wtdir env WORKTRUNK_CONFIG_PATH="$t/none.toml" WORKTRUNK_SYSTEM_CONFIG_PATH="$t/wt-system.toml")" = "~/from-system"
+check "worktree dir: WORKTRUNK_WORKTREE_PATH wins" \
+  test "$(wtdir env WORKTRUNK_WORKTREE_PATH='~/from-env/{{ branch }}' WORKTRUNK_CONFIG_PATH="$t/wt-user.toml")" = "~/from-env"
+}
 rm -rf "$t/cfg/agents"
 
 repo="$t/myproj"
@@ -127,6 +142,14 @@ echo "# my change" >>"$repo/.claude/hooks/format.sh"
 check "edited CLAUDE.md is kept as it is" bash -c "grep -q 'my lesson' '$repo/CLAUDE.md' && test ! -e '$repo/CLAUDE.md.oneai-bak'"
 check "edited format.sh is backed up before replace" grep -q 'my change' "$repo/.claude/hooks/format.sh.oneai-bak"
 check "wt approvals are not asked again" bash -c "! grep -q 'config approvals' '$STUB_LOG'"
+
+# --- WORKTRUNK_PROJECT_CONFIG_PATH: project hooks go where wt reads them ---
+repo2="$t/proj2"
+git init -q "$repo2"
+WORKTRUNK_PROJECT_CONFIG_PATH=worktrunk.toml "$oneai" --yes --no-attach "$repo2" >/dev/null 2>&1
+check "project config follows WORKTRUNK_PROJECT_CONFIG_PATH" bash -c "test -f '$repo2/worktrunk.toml' && test ! -e '$repo2/.config/wt.toml'"
+WORKTRUNK_PROJECT_CONFIG_PATH=/abs/wt.toml "$oneai" --yes --no-attach "$repo2" >/dev/null 2>&1
+check "absolute project config path is left alone" test ! -e /abs/wt.toml
 
 # --- side agents ---
 : >"$STUB_LOG"

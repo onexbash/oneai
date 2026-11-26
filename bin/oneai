@@ -18,6 +18,8 @@ SELF="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
 SHARE="${ONEAI_SHARE:-$(dirname "$(dirname "$SELF")")/share/oneai}"
 CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 MARKER="oneai-managed"
+# Where Worktrunk reads project hooks; relative paths resolve from the worktree root.
+WT_PROJECT_CONFIG="${WORKTRUNK_PROJECT_CONFIG_PATH:-.config/wt.toml}"
 
 DRY=0
 YES=0
@@ -153,12 +155,13 @@ What setup writes (never overwrites silently):
     agents/explorer.md, output-reader.md, test-writer.md, doc-writer.md
     CLAUDE.md: the block between "<!-- oneai:begin workflow" and "<!-- oneai:end workflow -->"
     settings.json: only permissions.additionalDirectories gets Worktrunk's worktree dir
-      (static part of worktree-path, e.g. ~/dev/worktrees; override: ONEAI_WORKTREES_DIR)
+      (static part of worktree-path from WORKTRUNK_WORKTREE_PATH, the user or the system
+      config, e.g. ~/dev/worktrees; override: ONEAI_WORKTREES_DIR)
   Project layer (REPO):
     CLAUDE.md, justfile, .claude/settings.json, .claude/hooks/{checks,format,stop-check}.sh,
-    .config/wt.toml, .worktreeinclude, STATE.md (main checkout), .mcp.json (frontends only),
+    $WT_PROJECT_CONFIG (WORKTRUNK_PROJECT_CONFIG_PATH), .worktreeinclude, STATE.md (main checkout), .mcp.json (frontends only),
     missing .gitignore lines
-    Files you edit (CLAUDE.md, STATE.md, justfile, settings.json, checks.sh, wt.toml,
+    Files you edit (CLAUDE.md, STATE.md, justfile, settings.json, checks.sh, Worktrunk config,
     .worktreeinclude) are only created when missing. format.sh, stop-check.sh and .mcp.json
     are kept in sync with the templates: differences are shown as a diff and asked about.
   Every created file carries the marker "$MARKER" (except JSON: compared with the template).
@@ -174,7 +177,9 @@ Worktree trust: Claude Code keys trust on the main checkout's root, so worktrees
 trusted repo need no extra trust entry. oneai never writes ~/.claude.json.
 
 Environment: CLAUDE_CONFIG_DIR, ONEAI_SHARE (templates), ONEAI_SIDE_MAX,
-ONEAI_TUIOS_SERVER (separate tuios daemon, for tests).
+ONEAI_TUIOS_SERVER (separate tuios daemon, for tests). Worktrunk: WORKTRUNK_CONFIG_PATH,
+WORKTRUNK_SYSTEM_CONFIG_PATH, WORKTRUNK_WORKTREE_PATH, WORKTRUNK_PROJECT_CONFIG_PATH are read
+the way wt reads them.
 EOF
 }
 
@@ -256,13 +261,19 @@ is_frontend() {
 # ---------------------------------------------------------- global layer ---
 
 # Static part of Worktrunk's worktree-path when it is outside the repos (e.g. ~/dev/worktrees).
+# Same order as Worktrunk: WORKTRUNK_WORKTREE_PATH, user config, system config.
+# shortcut: per-project [projects."…"] entries are ignored; add one only if a repo needs its own path.
 worktrees_dir() {
-  local tpl prefix
+  local tpl="" prefix f
   [ -z "${ONEAI_WORKTREES_DIR:-}" ] || {
     printf '%s' "$ONEAI_WORKTREES_DIR"
     return
   }
-  tpl="$(sed -n 's/^worktree-path *= *"\(.*\)"$/\1/p' "${XDG_CONFIG_HOME:-$HOME/.config}/worktrunk/config.toml" 2>/dev/null | head -n 1)"
+  tpl="${WORKTRUNK_WORKTREE_PATH:-}"
+  for f in "${WORKTRUNK_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/worktrunk/config.toml}" "${WORKTRUNK_SYSTEM_CONFIG_PATH:-}"; do
+    [ -z "$tpl" ] && [ -n "$f" ] || continue
+    tpl="$(sed -n 's/^worktree-path *= *"\(.*\)"$/\1/p' "$f" 2>/dev/null | head -n 1)"
+  done
   prefix="${tpl%%\{\{*}"
   prefix="${prefix%/}"
   # shellcheck disable=SC2088 # a literal ~/ prefix is wanted: settings.json expands it
@@ -386,6 +397,15 @@ each_file() {
       [ "$ROOT" = "$MAIN" ] || continue
       target=STATE.md # shipped renamed: many global gitignores skip STATE.md
     fi
+    if [ "$rel" = .config/wt.toml ]; then
+      case "$WT_PROJECT_CONFIG" in
+        /*)
+          log_warn "WORKTRUNK_PROJECT_CONFIG_PATH is absolute ($WT_PROJECT_CONFIG), shared by every repo: oneai leaves it alone"
+          continue
+          ;;
+      esac
+      target="$WT_PROJECT_CONFIG"
+    fi
     out="$tmp/$rel"
     mkdir -p "$(dirname "$out")"
     sed "s|{{PROJECT}}|$(basename "$MAIN")|g" "$SHARE/templates/$rel" >"$out"
@@ -398,7 +418,7 @@ each_file() {
 
 # Files the project and Jarvis are meant to edit: created when missing, never offered for
 # replacement, so a daily `oneai REPO` neither asks about them nor touches lessons or state.
-SEED_FILES=" CLAUDE.md STATE.md justfile .claude/settings.json .claude/hooks/checks.sh .config/wt.toml .worktreeinclude "
+SEED_FILES=" CLAUDE.md STATE.md justfile .claude/settings.json .claude/hooks/checks.sh $WT_PROJECT_CONFIG .worktreeinclude "
 place_project() {
   case "$SEED_FILES" in *" ${2#"$ROOT"/} "*) [ -e "$2" ] && return 0 ;; esac
   place_file "$@"
@@ -429,9 +449,9 @@ setup_files() {
   if [ -n "$CHANGED" ]; then
     log_warn "commit the new project files, so side agents' worktrees (branched from the default branch) get them"
   fi
-  # Only right after creating wt.toml; later changes make Worktrunk ask by itself.
-  if [[ $CHANGED == *.config/wt.toml* ]] && have wt; then
-    log_info "Worktrunk asks once per repo before running the project hooks in .config/wt.toml."
+  # Only right after creating the project config; later changes make Worktrunk ask by itself.
+  if [[ $CHANGED == *"$WT_PROJECT_CONFIG"* ]] && have wt; then
+    log_info "Worktrunk asks once per repo before running the project hooks in $WT_PROJECT_CONFIG."
     if ask "Approve them now ('wt config approvals add')?"; then run wt -C "$ROOT" config approvals add || log_warn "approval failed"; fi
   fi
 }

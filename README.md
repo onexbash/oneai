@@ -17,9 +17,8 @@ only the copy steps run with `sudo` (password prompt). Run the installer itself 
 with `sudo`. Without root: `ONEAI_PREFIX=$HOME/.local`.
 
 `install.sh` ends with `oneai global`, which keeps the global layer in `$CLAUDE_CONFIG_DIR`
-current: the four helper agents, a marked workflow block in your `CLAUDE.md`, and Worktrunk's
-worktree directory in `permissions.additionalDirectories` of `settings.json` (nothing else there
-is touched). It shows every change as a diff, asks once, keeps `*.oneai-bak` backups and writes
+current: the four helper agents and a marked workflow block in your `CLAUDE.md` (nothing else
+there is touched). It shows every change as a diff, asks once, keeps `*.oneai-bak` backups and writes
 through symlinks. Run `oneai global` again after pulling a new oneai version.
 
 Needs `git claude tuios wt jq just`; recommends `lazygit nvim glow shellcheck shfmt`.
@@ -30,9 +29,9 @@ Needs `git claude tuios wt jq just`; recommends `lazygit nvim glow shellcheck sh
 
 | Layer | Location | Files |
 |---|---|---|
-| Global | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | `agents/{explorer,output-reader,test-writer,doc-writer}.md`; in your own `CLAUDE.md` only the `oneai:begin/end workflow` block; in your `settings.json` only the worktrees entry in `permissions.additionalDirectories`. Source: `share/oneai/global/` |
+| Global | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | `agents/{explorer,output-reader,test-writer,doc-writer}.md`; in your own `CLAUDE.md` only the `oneai:begin/end workflow` block. Source: `share/oneai/global/` |
 | Project | `<repo>/` | `CLAUDE.md` (verify command, test and docs paths, lessons), `justfile`, `.claude/settings.json` (narrow allow rules, format + Stop hooks), `.claude/hooks/*.sh`, `.config/wt.toml` or `$WORKTRUNK_PROJECT_CONFIG_PATH` (Worktrunk hooks), `.worktreeinclude` |
-| Worktrunk user config | `~/.config/worktrunk/config.toml` | `worktree-path = "~/dev/worktrees/{{ repo }}/{{ branch \| sanitize }}"`: worktrees live outside every repo, so Claude Code there loads only the worktree's own CLAUDE.md. `oneai global` adds that directory to the global `additionalDirectories` |
+| Worktrunk user config | `$WORKTRUNK_CONFIG_PATH` (default `~/.config/worktrunk/config.toml`) | `worktree-path = "{{ repo_path }}/.worktrees/{{ branch \| sanitize }}"`: side agents' worktrees live inside the repo (`/.worktrees/` is gitignored), so Jarvis can read and review them without extra permissions |
 | Project, not committed | main checkout | `STATE.md`, `STATE-archive.md`, `.claude/metrics.csv`, `.claude/settings.local.json` |
 
 Helpers read the test and docs paths from the `## Paths` section of the project's CLAUDE.md.
@@ -59,7 +58,7 @@ Helpers read the test and docs paths from the `## Paths` section of the project'
 oneai side fix/typo 'Goal: … Files: … Acceptance: … Verify: just verify'
 oneai side --model sonnet docs/rename '…'      # mechanical work
 ```
-It creates the worktree in `~/dev/worktrees/<repo>/<branch>` (`wt switch -c -x claude`), copies `.env*` via `.worktreeinclude`,
+It creates the worktree in `<repo>/.worktrees/<branch>` (`wt switch -c -x claude`), copies `.env*` via `.worktreeinclude`,
 and opens Claude Code on workspace 4. Track it with `wt list` and
 `tuios agent-log -w side-<slug> --recap`. After your OK, from the worktree:
 log metrics with `oneai metrics log --who side --dir <worktree> …`, then `wt -C <worktree> merge`
@@ -68,6 +67,10 @@ log metrics with `oneai metrics log --who side --dir <worktree> …`, then `wt -
 time; raise `ONEAI_SIDE_MAX` only when metrics show long unattended runs that pass verify first try.
 
 **Your own parallel coding**: `wt switch -c my-branch` in a shell, so you and Jarvis never share a checkout.
+
+**Worktrees inside the repo**: git, ripgrep and Claude's search skip `/.worktrees/` because it is
+gitignored, but some tools don't read `.gitignore`. If tests or type checks in the main checkout
+also pick up files from `.worktrees/`, exclude it there (e.g. vitest `exclude`, tsconfig `exclude`).
 
 **Metrics**: `oneai metrics summary` compares averages per `--who`. For the baseline, log tasks
 done in a plain session: `oneai metrics sessions` lists recent session IDs, then

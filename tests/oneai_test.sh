@@ -33,16 +33,14 @@ printf 'wt %s\n' "$*" >>"$STUB_LOG"
 EOF
 chmod +x "$t/bin/"*
 # The Worktrunk setup of your shell must not leak into the tests.
-unset WORKTRUNK_CONFIG_PATH WORKTRUNK_SYSTEM_CONFIG_PATH WORKTRUNK_PROJECT_CONFIG_PATH WORKTRUNK_WORKTREE_PATH
+unset WORKTRUNK_PROJECT_CONFIG_PATH
 export PATH="$t/bin:$PATH" STUB_LOG="$t/calls.log" CLAUDE_CONFIG_DIR="$t/cfg"
 # Global files are symlinks into a dotfiles dir, with content of their own.
-mkdir -p "$t/cfg" "$t/dot" "$t/xdg/worktrunk"
+mkdir -p "$t/cfg" "$t/dot"
 echo '{"enabledPlugins":{"worktrunk@worktrunk":true},"statusLine":{"command":"tuios x"},"permissions":{"additionalDirectories":["~/a"]}}' >"$t/dot/settings.json"
 printf '# Global preferences\n\n- my rule\n' >"$t/dot/CLAUDE.md"
 ln -s "$t/dot/settings.json" "$t/cfg/settings.json"
 ln -s "$t/dot/CLAUDE.md" "$t/cfg/CLAUDE.md"
-echo 'worktree-path = "~/dev/worktrees/{{ repo }}/{{ branch | sanitize }}"' >"$t/xdg/worktrunk/config.toml"
-export XDG_CONFIG_HOME="$t/xdg"
 
 # --- global layer only (what install.sh runs) ---
 "$oneai" global --dry-run >/dev/null 2>&1
@@ -51,8 +49,8 @@ check "global dry-run writes nothing" test ! -e "$t/cfg/agents"
 check "global: agents created" test -f "$t/cfg/agents/test-writer.md"
 check "global: settings.json is still a symlink" test -L "$t/cfg/settings.json"
 check "global: CLAUDE.md is still a symlink" test -L "$t/cfg/CLAUDE.md"
-check "global: worktrees dir added, own entries kept" \
-  jq -e '.permissions.additionalDirectories == ["~/a", "~/dev/worktrees"] and .statusLine.command == "tuios x"' "$t/dot/settings.json"
+check "global: settings.json is not touched" \
+  jq -e '.permissions.additionalDirectories == ["~/a"] and .statusLine.command == "tuios x"' "$t/dot/settings.json"
 check "global: workflow block appended, own text kept" bash -c "grep -q '^- my rule' '$t/dot/CLAUDE.md' && grep -q '^## Workflow' '$t/dot/CLAUDE.md'"
 gsum() { cksum "$t/dot/"* "$t/cfg/agents/"*; }
 g1="$(gsum)"
@@ -82,24 +80,6 @@ check "uninstall: missing end marker leaves CLAUDE.md unchanged" cmp -s "$t/brok
 gsed -i 's/^<!-- oneai:begin workflow.*/<!-- oneai:begin workflow (old wording) -->/; s/^<!-- oneai:end workflow.*/<!-- oneai:end workflow (old) -->/' "$t/dot/CLAUDE.md"
 "$oneai" global --yes >/dev/null 2>&1
 check "global: reworded markers replaced, not duplicated" test "$(grep -c '^## Workflow' "$t/dot/CLAUDE.md")" = 1
-# "~/x" and "$HOME/x" are one entry
-mkdir -p "$t/abs"
-printf '{"permissions":{"additionalDirectories":["%s/dev/worktrees"]}}\n' "$HOME" >"$t/abs/settings.json"
-CLAUDE_CONFIG_DIR="$t/abs" "$oneai" global --yes >/dev/null 2>&1
-check "global: absolute spelling counts as present" jq -e '.permissions.additionalDirectories | length == 1' "$t/abs/settings.json"
-# Worktrunk env vars: WORKTRUNK_WORKTREE_PATH beats WORKTRUNK_CONFIG_PATH beats the system config
-printf '{}\n' >"$t/wtenv.json"
-wtdir() { mkdir -p "$t/w" && cp "$t/wtenv.json" "$t/w/settings.json" && CLAUDE_CONFIG_DIR="$t/w" "$@" "$oneai" global --yes >/dev/null 2>&1; jq -r '.permissions.additionalDirectories[0]' "$t/w/settings.json"; }
-echo 'worktree-path = "~/from-user/{{ repo }}"' >"$t/wt-user.toml"
-echo 'worktree-path = "~/from-system/{{ repo }}"' >"$t/wt-system.toml"
-# shellcheck disable=SC2088 # the literal "~/…" in settings.json is what is checked
-{
-check "worktree dir: WORKTRUNK_CONFIG_PATH is read" test "$(wtdir env WORKTRUNK_CONFIG_PATH="$t/wt-user.toml")" = "~/from-user"
-check "worktree dir: system config when the user config has none" \
-  test "$(wtdir env WORKTRUNK_CONFIG_PATH="$t/none.toml" WORKTRUNK_SYSTEM_CONFIG_PATH="$t/wt-system.toml")" = "~/from-system"
-check "worktree dir: WORKTRUNK_WORKTREE_PATH wins" \
-  test "$(wtdir env WORKTRUNK_WORKTREE_PATH='~/from-env/{{ branch }}' WORKTRUNK_CONFIG_PATH="$t/wt-user.toml")" = "~/from-env"
-}
 rm -rf "$t/cfg/agents"
 
 repo="$t/myproj"
@@ -122,6 +102,7 @@ done
 check "CLAUDE.md names the project" grep -q '^# myproj' "$repo/CLAUDE.md"
 check "hooks are executable" test -x "$repo/.claude/hooks/stop-check.sh"
 check ".gitignore has STATE.md" grep -qxF /STATE.md "$repo/.gitignore"
+check ".gitignore has the in-repo worktrees" grep -qxF /.worktrees/ "$repo/.gitignore"
 check "no defaultMode in project settings" bash -c "! jq -e '.permissions.defaultMode' '$repo/.claude/settings.json'"
 check "Jarvis starts on workspace 2" grep -q 'start-agent claude .*--workspace 2 .*--name jarvis' "$t/calls.log"
 check "workspace 4 is named" grep -q 'set-workspace-name 4 Side agents' "$t/calls.log"

@@ -154,9 +154,6 @@ What setup writes (never overwrites silently):
   applied after one question, symlinked files written through (they stay links):
     agents/explorer.md, output-reader.md, test-writer.md, doc-writer.md
     CLAUDE.md: the block between "<!-- oneai:begin workflow" and "<!-- oneai:end workflow -->"
-    settings.json: only permissions.additionalDirectories gets Worktrunk's worktree dir
-      (static part of worktree-path from WORKTRUNK_WORKTREE_PATH, the user or the system
-      config, e.g. ~/dev/worktrees; override: ONEAI_WORKTREES_DIR)
   Project layer (REPO):
     CLAUDE.md, justfile, .claude/settings.json, .claude/hooks/{checks,format,stop-check}.sh,
     $WT_PROJECT_CONFIG (WORKTRUNK_PROJECT_CONFIG_PATH), .worktreeinclude, STATE.md (main checkout), .mcp.json (frontends only),
@@ -177,9 +174,12 @@ Worktree trust: Claude Code keys trust on the main checkout's root, so worktrees
 trusted repo need no extra trust entry. oneai never writes ~/.claude.json.
 
 Environment: CLAUDE_CONFIG_DIR, ONEAI_SHARE (templates), ONEAI_SIDE_MAX,
-ONEAI_TUIOS_SERVER (separate tuios daemon, for tests). Worktrunk: WORKTRUNK_CONFIG_PATH,
-WORKTRUNK_SYSTEM_CONFIG_PATH, WORKTRUNK_WORKTREE_PATH, WORKTRUNK_PROJECT_CONFIG_PATH are read
-the way wt reads them.
+ONEAI_TUIOS_SERVER (separate tuios daemon, for tests),
+WORKTRUNK_PROJECT_CONFIG_PATH (where the Worktrunk project hooks go, as wt reads it).
+
+Worktrees: side agents' worktrees belong inside the repo, so Jarvis can read them:
+worktree-path = "{{ repo_path }}/.worktrees/{{ branch | sanitize }}" in the Worktrunk user
+config (/.worktrees/ is added to .gitignore).
 EOF
 }
 
@@ -260,26 +260,6 @@ is_frontend() {
 
 # ---------------------------------------------------------- global layer ---
 
-# Static part of Worktrunk's worktree-path when it is outside the repos (e.g. ~/dev/worktrees).
-# Same order as Worktrunk: WORKTRUNK_WORKTREE_PATH, user config, system config.
-# shortcut: per-project [projects."…"] entries are ignored; add one only if a repo needs its own path.
-worktrees_dir() {
-  local tpl="" prefix f
-  [ -z "${ONEAI_WORKTREES_DIR:-}" ] || {
-    printf '%s' "$ONEAI_WORKTREES_DIR"
-    return
-  }
-  tpl="${WORKTRUNK_WORKTREE_PATH:-}"
-  for f in "${WORKTRUNK_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/worktrunk/config.toml}" "${WORKTRUNK_SYSTEM_CONFIG_PATH:-}"; do
-    [ -z "$tpl" ] && [ -n "$f" ] || continue
-    tpl="$(sed -n 's/^worktree-path *= *"\(.*\)"$/\1/p' "$f" 2>/dev/null | head -n 1)"
-  done
-  prefix="${tpl%%\{\{*}"
-  prefix="${prefix%/}"
-  # shellcheck disable=SC2088 # a literal ~/ prefix is wanted: settings.json expands it
-  case "$prefix" in "~/"?* | /?*) printf '%s' "$prefix" ;; esac
-}
-
 # with_block FILE ADD: FILE with oneai's CLAUDE.md block replaced in place,
 # appended when missing (ADD=1), or removed (ADD=0). A copy of the block's text
 # without the markers (pasted by hand) gets wrapped instead of duplicated.
@@ -317,24 +297,12 @@ with_block() {
 
 # global_render DIR: write the desired global files to DIR; print "RENDERED<TAB>TARGET" per file.
 global_render() {
-  local out="$1" f dir cur="$CLAUDE_CFG/settings.json"
+  local out="$1" f
   for f in "$SHARE"/global/agents/*.md; do printf '%s\t%s\n' "$f" "$CLAUDE_CFG/agents/$(basename "$f")"; done
   if with_block "$CLAUDE_CFG/CLAUDE.md" 1 >"$out/CLAUDE.md"; then
     printf '%s\t%s\n' "$out/CLAUDE.md" "$CLAUDE_CFG/CLAUDE.md"
   else
     log_warn "$CLAUDE_CFG/CLAUDE.md has '$BLOCK_BEGIN' but no '$BLOCK_END' line: left unchanged, fix it by hand"
-  fi
-  dir="$(worktrees_dir)"
-  [ -n "$dir" ] || return 0
-  [ -e "$cur" ] || cur=/dev/null
-  # Only permissions.additionalDirectories changes; hooks and statusLine (tuios) stay as they are.
-  # "~/x" and "$HOME/x" are the same entry.
-  if jq -s --arg d "$dir" --arg home "$HOME" '(.[0] // {}) | .permissions.additionalDirectories =
-      ((.permissions.additionalDirectories // []) | ($d | sub("^~"; $home)) as $abs
-        | if any(.[]; sub("^~"; $home) == $abs) then . else . + [$d] end)' "$cur" >"$out/settings.json"; then
-    printf '%s\t%s\n' "$out/settings.json" "$CLAUDE_CFG/settings.json"
-  else
-    log_warn "$CLAUDE_CFG/settings.json is not valid JSON: add \"$dir\" to permissions.additionalDirectories yourself"
   fi
 }
 
@@ -382,7 +350,6 @@ uninstall_global() {
     fi
     rm -f "$tmp"
   fi
-  log_info "kept permissions.additionalDirectories in settings.json (remove the worktrees entry yourself if unwanted)"
 }
 
 # --------------------------------------------------------- project files ---

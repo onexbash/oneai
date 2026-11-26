@@ -1,0 +1,12 @@
+# oneai-managed: Worktrunk project hooks. `oneai --uninstall` asks before removing it once edited.
+# Side agents run in worktrees created with `wt switch -c -x claude <branch> -- '<prompt>'`.
+
+[pre-start]
+# Before the agent starts: copy the gitignored files listed in .worktreeinclude (.env*, local Claude settings).
+copy = "wt step copy-ignored --require-include"
+# Install dependencies (pnpm shares its store, so this is mostly hardlinks). No-op without a pnpm lockfile.
+deps = "[ ! -f pnpm-lock.yaml ] || pnpm install --frozen-lockfile"
+
+[pre-merge]
+# Nothing merges without passing the full verify.
+verify = "just verify"

@@ -1,3 +1,4 @@
+# oneai-managed: `oneai --uninstall` asks before removing it once edited.
 # The checks live in .claude/hooks/checks.sh (it detects the stack); edit them there.
 
 # Full verify: format check, lint, typecheck, all tests. Run before every merge.

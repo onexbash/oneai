@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# oneai-managed: `oneai --uninstall` asks before removing it once edited.
 # PostToolUse hook (Edit|Write|MultiEdit): format the edited file. Always silent, always exit 0.
 f="$(jq -r '.tool_input.file_path // empty' 2>/dev/null)"
 [ -n "$f" ] && [ -f "$f" ] || exit 0

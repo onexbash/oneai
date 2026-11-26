@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# oneai-managed: `oneai --uninstall` asks before removing it once edited.
 # Project checks, detected per stack. Edit the commands below to fit the project.
 #   checks.sh fast   changed files only: lint, typecheck, affected tests (Stop hook)
 #   checks.sh full   format check, lint, typecheck, all tests (before every merge)
@@ -96,6 +97,13 @@ if command -v shellcheck >/dev/null; then
   fi
   # shellcheck disable=SC2086
   if [ -n "$files" ]; then step shellcheck shellcheck $files; fi
+fi
+
+# ---------- Shell tests (tests/*_test.sh) ----------
+if [ "$mode" = full ]; then
+  for t in tests/*_test.sh; do
+    if [ -f "$t" ]; then step "test $(basename "$t")" bash "$t"; fi
+  done
 fi
 
 if [ "$ran" -eq 0 ]; then printf 'no checks for this stack yet: edit .claude/hooks/checks.sh\n'; fi
